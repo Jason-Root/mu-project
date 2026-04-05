@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.3.9",
+    [string]$Version = "0.3.10",
     [string]$PythonPath = ""
 )
 
@@ -56,19 +56,19 @@ if (Test-Path $zipPath) {
 Compress-Archive -Path (Join-Path $releaseRoot "*") -DestinationPath $zipPath
 Write-Output "Built release archive: $zipPath"
 
-$manifestPath = Join-Path $distRoot "MU-Unscramble-Bot-$Version-update-manifest.json"
-$updateAssetRoot = Join-Path $distRoot "update-assets"
+$updatePublishRoot = Join-Path $distRoot "update-files\\windows\\latest"
+$manifestPath = Join-Path $updatePublishRoot "update-manifest.json"
 if (Test-Path $manifestPath) {
     Remove-Item -LiteralPath $manifestPath -Force
 }
-if (Test-Path $updateAssetRoot) {
-    Remove-Item -LiteralPath $updateAssetRoot -Recurse -Force
+if (Test-Path $updatePublishRoot) {
+    Remove-Item -LiteralPath $updatePublishRoot -Recurse -Force
 }
 
 & $python "scripts\\build_update_manifest.py" `
     --release-root $releaseRoot `
     --version $Version `
     --manifest-output $manifestPath `
-    --asset-output-dir $updateAssetRoot
+    --asset-output-dir $updatePublishRoot
 
 Write-Output "Built file update manifest: $manifestPath"

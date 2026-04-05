@@ -40,19 +40,17 @@ def build_manifest(release_root: Path, version: str, manifest_output: Path, asse
             existing.unlink()
 
     files: list[dict[str, object]] = []
-    for index, source_path in enumerate(sorted(path for path in release_root.rglob("*") if path.is_file()), start=1):
+    for source_path in sorted(path for path in release_root.rglob("*") if path.is_file()):
         relative_path = source_path.relative_to(release_root).as_posix()
         sha256 = sha256_file(source_path)
-        asset_name = ""
-        if source_path.stat().st_size > 0:
-            asset_name = f"mu-update-{index:04d}-{sha256[:16]}-{source_path.name}"
-            shutil.copy2(source_path, asset_output_dir / asset_name)
+        destination_path = asset_output_dir / Path(relative_path)
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination_path)
         files.append(
             {
                 "path": relative_path,
                 "sha256": sha256,
                 "size": source_path.stat().st_size,
-                "asset_name": asset_name,
             }
         )
 

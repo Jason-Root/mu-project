@@ -20,6 +20,9 @@ from packaging.version import InvalidVersion, Version
 from mu_unscramble_bot import __version__
 from mu_unscramble_bot.paths import is_frozen, user_data_dir
 
+UPDATE_FILES_BRANCH = "update-files"
+UPDATE_FILES_ROOT = "windows/latest"
+
 
 @dataclass(frozen=True, slots=True)
 class UpdateCheckResult:
@@ -30,17 +33,8 @@ class UpdateCheckResult:
     notes: str = ""
     asset_name: str = ""
     asset_url: str = ""
-    manifest_asset_name: str = ""
     manifest_asset_url: str = ""
-    assets: tuple["ReleaseAsset", ...] = ()
     error: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class ReleaseAsset:
-    name: str
-    url: str
-    size: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +42,6 @@ class UpdateManifestFile:
     path: str
     sha256: str
     size: int
-    asset_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +104,7 @@ def check_for_updates(repository: str, *, timeout_seconds: float = 8.0) -> Updat
     available = bool(latest and latest_key is not None and current_key is not None and latest_key > current_key)
     assets = _extract_release_assets(payload)
     asset_name, asset_url = _pick_release_asset(assets)
-    manifest_asset_name, manifest_asset_url = _pick_manifest_asset(assets)
+    manifest_asset_url = _build_manifest_url(repository)
     return UpdateCheckResult(
         current_version=current,
         latest_version=latest,
@@ -120,9 +113,7 @@ def check_for_updates(repository: str, *, timeout_seconds: float = 8.0) -> Updat
         notes=str(payload.get("body", "") or "").strip(),
         asset_name=asset_name,
         asset_url=asset_url,
-        manifest_asset_name=manifest_asset_name,
         manifest_asset_url=manifest_asset_url,
-        assets=assets,
         error="" if latest else "No release version was returned from GitHub.",
     )
 
@@ -149,7 +140,6 @@ def fetch_release_manifest(result: UpdateCheckResult, *, timeout_seconds: float 
             continue
         path = str(entry.get("path", "") or "").strip().replace("\\", "/")
         sha256 = str(entry.get("sha256", "") or "").strip().lower()
-        asset_name = str(entry.get("asset_name", "") or "").strip()
         size_value = entry.get("size", 0)
         try:
             size = max(0, int(size_value))
@@ -157,7 +147,7 @@ def fetch_release_manifest(result: UpdateCheckResult, *, timeout_seconds: float 
             size = 0
         if not path or not sha256:
             continue
-        files.append(UpdateManifestFile(path=path, sha256=sha256, size=size, asset_name=asset_name))
+        files.append(UpdateManifestFile(path=path, sha256=sha256, size=size))
 
     if not files:
         raise RuntimeError("The update manifest did not contain any files.")
@@ -199,7 +189,6 @@ def prepare_file_update(result: UpdateCheckResult, *, timeout_seconds: float = 4
     executable = Path(sys.executable).resolve()
     install_root = executable.parent.parent
     update_log_path = user_data_dir() / "update.log"
-    asset_map = {asset.name: asset for asset in result.assets}
 
     changed_files: list[UpdateManifestFile] = []
     expected_paths = {entry.path for entry in manifest.files}
@@ -228,7 +217,6 @@ def prepare_file_update(result: UpdateCheckResult, *, timeout_seconds: float = 4
                         "path": entry.path,
                         "sha256": entry.sha256,
                         "size": entry.size,
-                        "asset_name": entry.asset_name,
                     }
                     for entry in manifest.files
                 ],
@@ -239,13 +227,10 @@ def prepare_file_update(result: UpdateCheckResult, *, timeout_seconds: float = 4
     )
 
     for entry in changed_files:
-        asset = asset_map.get(entry.asset_name)
-        if entry.size == 0 or not entry.asset_name:
+        if entry.size == 0:
             continue
-        if asset is None:
-            raise RuntimeError(f"Update asset missing from the release: {entry.asset_name}")
         destination = download_root / Path(*entry.path.split("/"))
-        _download_binary(asset.url, destination, timeout_seconds=timeout_seconds)
+        _download_binary(_build_manifest_file_url(result, entry.path), destination, timeout_seconds=timeout_seconds)
 
     plan_path.write_text(
         json.dumps(
@@ -340,34 +325,27 @@ def stage_windows_file_update(prepared: PreparedFileUpdate) -> Path:
     return prepared.update_log_path
 
 
-def _extract_release_assets(payload: dict[str, object]) -> tuple[ReleaseAsset, ...]:
+def _extract_release_assets(payload: dict[str, object]) -> tuple[tuple[str, str], ...]:
     raw_assets = payload.get("assets", [])
     if not isinstance(raw_assets, list):
         return ()
 
-    assets: list[ReleaseAsset] = []
+    assets: list[tuple[str, str]] = []
     for asset in raw_assets:
         if not isinstance(asset, dict):
             continue
         name = str(asset.get("name", "") or "").strip()
         url = str(asset.get("browser_download_url", "") or "").strip()
-        size_value = asset.get("size", 0)
-        try:
-            size = max(0, int(size_value))
-        except Exception:
-            size = 0
         if not name or not url:
             continue
-        assets.append(ReleaseAsset(name=name, url=url, size=size))
+        assets.append((name, url))
     return tuple(assets)
 
 
-def _pick_release_asset(assets: tuple[ReleaseAsset, ...]) -> tuple[str, str]:
+def _pick_release_asset(assets: tuple[tuple[str, str], ...]) -> tuple[str, str]:
     preferred: tuple[str, str] = ("", "")
     fallback: tuple[str, str] = ("", "")
-    for asset in assets:
-        name = asset.name
-        url = asset.url
+    for name, url in assets:
         if not name or not url:
             continue
         lowered = name.lower()
@@ -380,12 +358,17 @@ def _pick_release_asset(assets: tuple[ReleaseAsset, ...]) -> tuple[str, str]:
     return fallback if fallback[0] else preferred
 
 
-def _pick_manifest_asset(assets: tuple[ReleaseAsset, ...]) -> tuple[str, str]:
-    for asset in assets:
-        lowered = asset.name.lower()
-        if lowered.endswith("-update-manifest.json") or lowered.endswith("update-manifest.json"):
-            return asset.name, asset.url
-    return "", ""
+def _build_manifest_url(repository: str) -> str:
+    owner, repo = repository.split("/", 1)
+    base = f"https://raw.githubusercontent.com/{owner}/{repo}/refs/heads/{UPDATE_FILES_BRANCH}/{UPDATE_FILES_ROOT}"
+    return f"{base}/update-manifest.json"
+
+
+def _build_manifest_file_url(result: UpdateCheckResult, relative_path: str) -> str:
+    manifest_url = result.manifest_asset_url.strip()
+    base_url = manifest_url.rsplit("/", 1)[0]
+    quoted_path = urllib.parse.quote(relative_path.replace("\\", "/"), safe="/")
+    return f"{base_url}/{quoted_path}"
 
 
 def _build_apply_update_script(
