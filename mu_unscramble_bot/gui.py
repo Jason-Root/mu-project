@@ -629,6 +629,7 @@ class DesktopApp:
         self._pending_stop = threading.Event()
         self._client_choices: list[ClientChoice] = []
         self._details_visible = False
+        self._log_lines: list[str] = []
 
         self.selected_client = tk.StringVar()
         self.status_var = tk.StringVar(value="Choose a character, then go live.")
@@ -639,8 +640,6 @@ class DesktopApp:
         self.details_button_var = tk.StringVar(value="Show Details")
         self.badges_var = tk.StringVar(value="")
         self.version_var = tk.StringVar(value=f"v{get_app_version()}")
-        self.log_var = tk.StringVar(value="")
-        self.ocr_var = tk.StringVar(value="-")
 
         self._build_styles()
         self._build_ui()
@@ -700,8 +699,25 @@ class DesktopApp:
         self._make_button(button_row, "Settings", self._open_settings, accent=BLUE).pack(side="left")
         self._make_button(button_row, "Updates", self._start_update_check, accent="#2d5f41").pack(side="left", padx=(8, 0))
 
-        body = tk.Frame(self.root, bg=WINDOW_BG, padx=18, pady=0)
-        body.pack(fill="both", expand=True)
+        scroll_shell = tk.Frame(self.root, bg=WINDOW_BG)
+        scroll_shell.pack(fill="both", expand=True)
+
+        self.main_canvas = tk.Canvas(
+            scroll_shell,
+            bg=WINDOW_BG,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.main_scrollbar = ttk.Scrollbar(scroll_shell, orient="vertical", command=self.main_canvas.yview)
+        self.main_canvas.configure(yscrollcommand=self.main_scrollbar.set)
+        self.main_canvas.pack(side="left", fill="both", expand=True)
+        self.main_scrollbar.pack(side="right", fill="y")
+
+        body = tk.Frame(self.main_canvas, bg=WINDOW_BG, padx=18, pady=0)
+        self._main_canvas_window = self.main_canvas.create_window((0, 0), window=body, anchor="nw")
+        body.bind("<Configure>", self._sync_main_scrollregion)
+        self.main_canvas.bind("<Configure>", self._sync_main_canvas_width)
+        self.root.bind("<MouseWheel>", self._on_main_mousewheel)
 
         control_card = self._card(body)
         control_card.pack(fill="x")
@@ -756,33 +772,46 @@ class DesktopApp:
         tk.Label(self.details_frame, text="Recent Activity", bg=CARD_BG, fg=TEXT_SOFT, font=("Segoe UI", 10, "bold")).pack(
             anchor="w"
         )
-        self.log_label = tk.Label(
-            self.details_frame,
-            textvariable=self.log_var,
+        log_shell = tk.Frame(self.details_frame, bg=CARD_BG)
+        log_shell.pack(fill="both", expand=True, pady=(8, 0))
+        self.log_text = tk.Text(
+            log_shell,
             bg=CARD_BG,
             fg=TEXT_MAIN,
+            insertbackground=TEXT_MAIN,
+            relief="flat",
             font=("Consolas", 9),
-            justify="left",
-            anchor="nw",
-            wraplength=680,
+            wrap="word",
             height=8,
+            yscrollcommand=lambda *args: self.log_scrollbar.set(*args),
         )
-        self.log_label.pack(fill="x", pady=(8, 0))
+        self.log_scrollbar = ttk.Scrollbar(log_shell, orient="vertical", command=self.log_text.yview)
+        self.log_text.pack(side="left", fill="both", expand=True)
+        self.log_scrollbar.pack(side="right", fill="y")
+        self.log_text.configure(state="disabled")
         tk.Label(self.details_frame, text="Live OCR", bg=CARD_BG, fg=TEXT_SOFT, font=("Segoe UI", 10, "bold")).pack(
             anchor="w",
             pady=(10, 0),
         )
-        tk.Label(
-            self.details_frame,
-            textvariable=self.ocr_var,
+        ocr_shell = tk.Frame(self.details_frame, bg=CARD_BG)
+        ocr_shell.pack(fill="both", expand=True, pady=(8, 0))
+        self.ocr_text = tk.Text(
+            ocr_shell,
             bg=CARD_BG,
             fg="#79c0ff",
+            insertbackground=TEXT_MAIN,
+            relief="flat",
             font=("Consolas", 9),
-            justify="left",
-            anchor="nw",
-            wraplength=680,
+            wrap="word",
             height=6,
-        ).pack(fill="x", pady=(8, 0))
+            yscrollcommand=lambda *args: self.ocr_scrollbar.set(*args),
+        )
+        self.ocr_scrollbar = ttk.Scrollbar(ocr_shell, orient="vertical", command=self.ocr_text.yview)
+        self.ocr_text.pack(side="left", fill="both", expand=True)
+        self.ocr_scrollbar.pack(side="right", fill="y")
+        self.ocr_text.configure(state="disabled")
+        self._set_text_widget(self.log_text, "-")
+        self._set_text_widget(self.ocr_text, "-")
 
     def _card(self, parent: tk.Misc) -> tk.Frame:
         return tk.Frame(parent, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1, padx=14, pady=14)
@@ -802,6 +831,25 @@ class DesktopApp:
             font=("Segoe UI Semibold", 10),
             cursor="hand2",
         )
+
+    def _sync_main_scrollregion(self, _event: tk.Event | None = None) -> None:
+        self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+
+    def _sync_main_canvas_width(self, event: tk.Event) -> None:
+        self.main_canvas.itemconfigure(self._main_canvas_window, width=event.width)
+
+    def _on_main_mousewheel(self, event: tk.Event) -> str | None:
+        if event.delta == 0:
+            return None
+        self.main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
+
+    @staticmethod
+    def _set_text_widget(widget: tk.Text, text: str) -> None:
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", text.rstrip() or "-")
+        widget.configure(state="disabled")
 
     def reload_settings_badges(self) -> None:
         config = load_config()
@@ -949,7 +997,8 @@ class DesktopApp:
             archive_path = download_release_asset(result)
             self._message_queue.put(("log", f"Download complete: {archive_path.name}"))
             self._message_queue.put(("log", "Staging update and preparing restart..."))
-            stage_windows_update(archive_path)
+            update_log_path = stage_windows_update(archive_path)
+            self._message_queue.put(("log", f"Updater log: {update_log_path}"))
         except Exception as exc:
             self._message_queue.put(("update-install-error", f"Update install failed: {type(exc).__name__}: {exc}"))
             return
@@ -975,7 +1024,7 @@ class DesktopApp:
                 self.hint_var.set(payload.hint_text or "-")
                 round_text = payload.round_text or "-"
                 self.round_var.set(f"Round {round_text}")
-                self.ocr_var.set(payload.ocr_text or "-")
+                self._set_text_widget(self.ocr_text, payload.ocr_text or "-")
             elif kind == "log":
                 assert isinstance(payload, str)
                 self.append_log(payload)
@@ -1043,12 +1092,12 @@ class DesktopApp:
             self.details_frame.pack(fill="x", pady=(12, 0))
             self.details_button_var.set("Hide Details")
             self.details_button.config(text=self.details_button_var.get())
-            self.root.geometry("760x560")
+            self.root.after(50, lambda: self.main_canvas.yview_moveto(1.0))
         else:
             self.details_frame.pack_forget()
             self.details_button_var.set("Show Details")
             self.details_button.config(text=self.details_button_var.get())
-            self.root.geometry("760x320")
+            self.main_canvas.yview_moveto(0.0)
 
     def _open_duplicates_window(self) -> None:
         config = load_config()
@@ -1132,9 +1181,10 @@ class DesktopApp:
         os.startfile(path)
 
     def append_log(self, text: str) -> None:
-        existing = self.log_var.get().splitlines()
-        existing.append(text.rstrip())
-        self.log_var.set("\n".join(existing[-12:]))
+        self._log_lines.append(text.rstrip())
+        self._log_lines = self._log_lines[-200:]
+        self._set_text_widget(self.log_text, "\n".join(self._log_lines))
+        self.log_text.see("end")
 
     def _exit_for_update(self) -> None:
         try:

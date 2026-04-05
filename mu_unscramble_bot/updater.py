@@ -17,7 +17,7 @@ import webbrowser
 from packaging.version import InvalidVersion, Version
 
 from mu_unscramble_bot import __version__
-from mu_unscramble_bot.paths import is_frozen
+from mu_unscramble_bot.paths import is_frozen, user_data_dir
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,16 +128,14 @@ def download_release_asset(
     return destination
 
 
-def stage_windows_update(zip_path: str | Path) -> None:
+def stage_windows_update(zip_path: str | Path) -> Path:
     if not is_frozen():
         raise RuntimeError("Automatic update install only works from the packaged app build.")
 
     zip_path = Path(zip_path).resolve()
     executable = Path(sys.executable).resolve()
     install_root = executable.parent.parent
-    relaunch_target = install_root / "Start MU Unscramble Bot.vbs"
-    if not relaunch_target.exists():
-        relaunch_target = executable
+    update_log_path = user_data_dir() / "update.log"
 
     stage_root = Path(tempfile.mkdtemp(prefix="mu-unscramble-apply-"))
     script_path = stage_root / "apply_update.ps1"
@@ -146,7 +144,8 @@ def stage_windows_update(zip_path: str | Path) -> None:
             current_pid=os.getpid(),
             zip_path=zip_path,
             install_root=install_root,
-            relaunch_target=relaunch_target,
+            executable_name=executable.name,
+            update_log_path=update_log_path,
         ),
         encoding="utf-8",
     )
@@ -165,6 +164,7 @@ def stage_windows_update(zip_path: str | Path) -> None:
         ],
         creationflags=creationflags,
     )
+    return update_log_path
 
 
 def _pick_release_asset(payload: dict[str, object]) -> tuple[str, str]:
@@ -196,55 +196,100 @@ def _build_apply_update_script(
     current_pid: int,
     zip_path: Path,
     install_root: Path,
-    relaunch_target: Path,
+    executable_name: str,
+    update_log_path: Path,
 ) -> str:
     zip_literal = str(zip_path)
     install_root_literal = str(install_root)
-    relaunch_literal = str(relaunch_target)
+    executable_literal = str(executable_name)
+    update_log_literal = str(update_log_path)
     return textwrap.dedent(
         f"""
         $ErrorActionPreference = "Stop"
         $targetPid = {current_pid}
         $zipPath = "{zip_literal}"
         $installRoot = "{install_root_literal}"
-        $relaunchPath = "{relaunch_literal}"
+        $executableName = "{executable_literal}"
+        $updateLogPath = "{update_log_literal}"
         $stageRoot = Split-Path -Parent $PSCommandPath
         $extractRoot = Join-Path $stageRoot "extracted"
         $bundleSource = Join-Path $extractRoot "MU Unscramble Bot"
         $bundleTarget = Join-Path $installRoot "MU Unscramble Bot"
         $launcherSource = Join-Path $extractRoot "Start MU Unscramble Bot.vbs"
         $launcherTarget = Join-Path $installRoot "Start MU Unscramble Bot.vbs"
+        $relaunchPath = Join-Path $bundleTarget $executableName
+
+        function Write-UpdateLog([string]$message) {{
+            $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            $line = "[{0}] {1}" -f $stamp, $message
+            New-Item -ItemType Directory -Path (Split-Path -Parent $updateLogPath) -Force | Out-Null
+            Add-Content -LiteralPath $updateLogPath -Value $line
+        }}
+
+        function Invoke-WithRetry([scriptblock]$operation, [string]$description) {{
+            $lastError = $null
+            for ($attempt = 1; $attempt -le 10; $attempt++) {{
+                try {{
+                    & $operation
+                    Write-UpdateLog "$description succeeded on attempt $attempt."
+                    return
+                }} catch {{
+                    $lastError = $_
+                    Write-UpdateLog "$description failed on attempt $attempt: $($_.Exception.Message)"
+                    Start-Sleep -Milliseconds 800
+                }}
+            }}
+            throw $lastError
+        }}
+
+        Write-UpdateLog "Starting staged update from $zipPath into $installRoot."
 
         while (Get-Process -Id $targetPid -ErrorAction SilentlyContinue) {{
             Start-Sleep -Milliseconds 500
         }}
-        Start-Sleep -Milliseconds 700
+        Start-Sleep -Seconds 2
 
-        if (Test-Path -LiteralPath $extractRoot) {{
-            Remove-Item -LiteralPath $extractRoot -Recurse -Force
-        }}
-        New-Item -ItemType Directory -Path $extractRoot | Out-Null
-        Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force
+        try {{
+            if (Test-Path -LiteralPath $extractRoot) {{
+                Remove-Item -LiteralPath $extractRoot -Recurse -Force
+            }}
+            New-Item -ItemType Directory -Path $extractRoot | Out-Null
+            Write-UpdateLog "Extracting release archive."
+            Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force
 
-        if (Test-Path -LiteralPath $bundleTarget) {{
-            Remove-Item -LiteralPath $bundleTarget -Recurse -Force
-        }}
-        Copy-Item -LiteralPath $bundleSource -Destination $bundleTarget -Recurse -Force
+            Invoke-WithRetry {{
+                if (Test-Path -LiteralPath $bundleTarget) {{
+                    Remove-Item -LiteralPath $bundleTarget -Recurse -Force
+                }}
+            }} "Removing old app bundle"
 
-        if (Test-Path -LiteralPath $launcherSource) {{
-            Copy-Item -LiteralPath $launcherSource -Destination $launcherTarget -Force
-        }}
+            Invoke-WithRetry {{
+                Copy-Item -LiteralPath $bundleSource -Destination $bundleTarget -Recurse -Force
+            }} "Copying new app bundle"
 
-        if (Test-Path -LiteralPath $zipPath) {{
-            Remove-Item -LiteralPath $zipPath -Force
-        }}
-        if (Test-Path -LiteralPath $extractRoot) {{
-            Remove-Item -LiteralPath $extractRoot -Recurse -Force
-        }}
+            if (Test-Path -LiteralPath $launcherSource) {{
+                Invoke-WithRetry {{
+                    Copy-Item -LiteralPath $launcherSource -Destination $launcherTarget -Force
+                }} "Copying launcher script"
+            }}
 
-        Start-Process -FilePath $relaunchPath
-        Start-Sleep -Seconds 1
-        Remove-Item -LiteralPath $PSCommandPath -Force
+            if (Test-Path -LiteralPath $zipPath) {{
+                Remove-Item -LiteralPath $zipPath -Force
+            }}
+            if (Test-Path -LiteralPath $extractRoot) {{
+                Remove-Item -LiteralPath $extractRoot -Recurse -Force
+            }}
+
+            Write-UpdateLog "Relaunching updated executable from $relaunchPath."
+            Start-Process -FilePath $relaunchPath
+            Start-Sleep -Seconds 1
+            Write-UpdateLog "Update finished successfully."
+        }} catch {{
+            Write-UpdateLog "Update failed: $($_.Exception.Message)"
+            throw
+        }} finally {{
+            Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+        }}
         """
     ).strip()
 
