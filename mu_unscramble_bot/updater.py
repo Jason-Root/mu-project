@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -29,7 +30,40 @@ class UpdateCheckResult:
     notes: str = ""
     asset_name: str = ""
     asset_url: str = ""
+    manifest_asset_name: str = ""
+    manifest_asset_url: str = ""
+    assets: tuple["ReleaseAsset", ...] = ()
     error: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseAsset:
+    name: str
+    url: str
+    size: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateManifestFile:
+    path: str
+    sha256: str
+    size: int
+    asset_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateManifest:
+    version: str
+    generated_at: str = ""
+    files: tuple[UpdateManifestFile, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedFileUpdate:
+    stage_root: Path
+    changed_count: int
+    stale_count: int
+    update_log_path: Path
 
 
 def get_app_version() -> str:
@@ -75,7 +109,9 @@ def check_for_updates(repository: str, *, timeout_seconds: float = 8.0) -> Updat
     current_key = _safe_version(current)
     latest_key = _safe_version(latest)
     available = bool(latest and latest_key is not None and current_key is not None and latest_key > current_key)
-    asset_name, asset_url = _pick_release_asset(payload)
+    assets = _extract_release_assets(payload)
+    asset_name, asset_url = _pick_release_asset(assets)
+    manifest_asset_name, manifest_asset_url = _pick_manifest_asset(assets)
     return UpdateCheckResult(
         current_version=current,
         latest_version=latest,
@@ -84,6 +120,9 @@ def check_for_updates(repository: str, *, timeout_seconds: float = 8.0) -> Updat
         notes=str(payload.get("body", "") or "").strip(),
         asset_name=asset_name,
         asset_url=asset_url,
+        manifest_asset_name=manifest_asset_name,
+        manifest_asset_url=manifest_asset_url,
+        assets=assets,
         error="" if latest else "No release version was returned from GitHub.",
     )
 
@@ -92,6 +131,42 @@ def open_release_page(url: str) -> None:
     if not url.strip():
         return
     webbrowser.open(url.strip())
+
+
+def fetch_release_manifest(result: UpdateCheckResult, *, timeout_seconds: float = 45.0) -> UpdateManifest:
+    manifest_url = result.manifest_asset_url.strip()
+    if not manifest_url:
+        raise RuntimeError("This release does not expose a file update manifest yet.")
+
+    payload = _download_json(manifest_url, timeout_seconds=timeout_seconds)
+    raw_files = payload.get("files", [])
+    if not isinstance(raw_files, list):
+        raise RuntimeError("The update manifest is malformed.")
+
+    files: list[UpdateManifestFile] = []
+    for entry in raw_files:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path", "") or "").strip().replace("\\", "/")
+        sha256 = str(entry.get("sha256", "") or "").strip().lower()
+        asset_name = str(entry.get("asset_name", "") or "").strip()
+        size_value = entry.get("size", 0)
+        try:
+            size = max(0, int(size_value))
+        except Exception:
+            size = 0
+        if not path or not sha256 or not asset_name:
+            continue
+        files.append(UpdateManifestFile(path=path, sha256=sha256, size=size, asset_name=asset_name))
+
+    if not files:
+        raise RuntimeError("The update manifest did not contain any files.")
+
+    return UpdateManifest(
+        version=str(payload.get("version", result.latest_version) or result.latest_version),
+        generated_at=str(payload.get("generated_at", "") or ""),
+        files=tuple(files),
+    )
 
 
 def download_release_asset(
@@ -112,20 +187,81 @@ def download_release_asset(
 
     file_name = result.asset_name.strip() or Path(urllib.parse.urlparse(asset_url).path).name or "update.zip"
     destination = destination_root / file_name
-    request = urllib.request.Request(
-        asset_url,
-        headers={
-            "Accept": "application/octet-stream",
-            "User-Agent": "mu-unscramble-bot",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response, destination.open("wb") as handle:
-        while True:
-            chunk = response.read(1024 * 256)
-            if not chunk:
-                break
-            handle.write(chunk)
+    _download_binary(asset_url, destination, timeout_seconds=timeout_seconds)
     return destination
+
+
+def prepare_file_update(result: UpdateCheckResult, *, timeout_seconds: float = 45.0) -> PreparedFileUpdate:
+    if not is_frozen():
+        raise RuntimeError("Automatic file updates only work from the packaged app build.")
+
+    manifest = fetch_release_manifest(result, timeout_seconds=timeout_seconds)
+    executable = Path(sys.executable).resolve()
+    install_root = executable.parent.parent
+    update_log_path = user_data_dir() / "update.log"
+    asset_map = {asset.name: asset for asset in result.assets}
+
+    changed_files: list[UpdateManifestFile] = []
+    expected_paths = {entry.path for entry in manifest.files}
+    local_files = _list_managed_files(install_root)
+
+    for entry in manifest.files:
+        local_path = install_root / Path(*entry.path.split("/"))
+        if _file_matches_manifest(local_path, entry):
+            continue
+        changed_files.append(entry)
+
+    stale_paths = tuple(sorted(path for path in local_files if path not in expected_paths))
+
+    stage_root = Path(tempfile.mkdtemp(prefix="mu-unscramble-file-update-"))
+    download_root = stage_root / "files"
+    manifest_path = stage_root / "update-manifest.json"
+    plan_path = stage_root / "file-update-plan.json"
+    download_root.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "version": manifest.version,
+                "generated_at": manifest.generated_at,
+                "files": [
+                    {
+                        "path": entry.path,
+                        "sha256": entry.sha256,
+                        "size": entry.size,
+                        "asset_name": entry.asset_name,
+                    }
+                    for entry in manifest.files
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    for entry in changed_files:
+        asset = asset_map.get(entry.asset_name)
+        if asset is None:
+            raise RuntimeError(f"Update asset missing from the release: {entry.asset_name}")
+        destination = download_root / Path(*entry.path.split("/"))
+        _download_binary(asset.url, destination, timeout_seconds=timeout_seconds)
+
+    plan_path.write_text(
+        json.dumps(
+            {
+                "version": manifest.version,
+                "changed_files": [entry.path for entry in changed_files],
+                "stale_paths": list(stale_paths),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return PreparedFileUpdate(
+        stage_root=stage_root,
+        changed_count=len(changed_files),
+        stale_count=len(stale_paths),
+        update_log_path=update_log_path,
+    )
 
 
 def stage_windows_update(zip_path: str | Path) -> Path:
@@ -167,18 +303,69 @@ def stage_windows_update(zip_path: str | Path) -> Path:
     return update_log_path
 
 
-def _pick_release_asset(payload: dict[str, object]) -> tuple[str, str]:
-    assets = payload.get("assets", [])
-    if not isinstance(assets, list):
-        return "", ""
+def stage_windows_file_update(prepared: PreparedFileUpdate) -> Path:
+    if not is_frozen():
+        raise RuntimeError("Automatic file updates only work from the packaged app build.")
 
-    preferred: tuple[str, str] = ("", "")
-    fallback: tuple[str, str] = ("", "")
-    for asset in assets:
+    executable = Path(sys.executable).resolve()
+    install_root = executable.parent.parent
+    script_path = prepared.stage_root / "apply_file_update.ps1"
+    script_path.write_text(
+        _build_apply_file_update_script(
+            current_pid=os.getpid(),
+            install_root=install_root,
+            executable_name=executable.name,
+            stage_root=prepared.stage_root,
+            update_log_path=prepared.update_log_path,
+        ),
+        encoding="utf-8",
+    )
+
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    subprocess.Popen(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+            str(script_path),
+        ],
+        creationflags=creationflags,
+    )
+    return prepared.update_log_path
+
+
+def _extract_release_assets(payload: dict[str, object]) -> tuple[ReleaseAsset, ...]:
+    raw_assets = payload.get("assets", [])
+    if not isinstance(raw_assets, list):
+        return ()
+
+    assets: list[ReleaseAsset] = []
+    for asset in raw_assets:
         if not isinstance(asset, dict):
             continue
         name = str(asset.get("name", "") or "").strip()
         url = str(asset.get("browser_download_url", "") or "").strip()
+        size_value = asset.get("size", 0)
+        try:
+            size = max(0, int(size_value))
+        except Exception:
+            size = 0
+        if not name or not url:
+            continue
+        assets.append(ReleaseAsset(name=name, url=url, size=size))
+    return tuple(assets)
+
+
+def _pick_release_asset(assets: tuple[ReleaseAsset, ...]) -> tuple[str, str]:
+    preferred: tuple[str, str] = ("", "")
+    fallback: tuple[str, str] = ("", "")
+    for asset in assets:
+        name = asset.name
+        url = asset.url
         if not name or not url:
             continue
         lowered = name.lower()
@@ -189,6 +376,14 @@ def _pick_release_asset(payload: dict[str, object]) -> tuple[str, str]:
         if not preferred[0]:
             preferred = (name, url)
     return fallback if fallback[0] else preferred
+
+
+def _pick_manifest_asset(assets: tuple[ReleaseAsset, ...]) -> tuple[str, str]:
+    for asset in assets:
+        lowered = asset.name.lower()
+        if lowered.endswith("-update-manifest.json") or lowered.endswith("update-manifest.json"):
+            return asset.name, asset.url
+    return "", ""
 
 
 def _build_apply_update_script(
@@ -292,6 +487,175 @@ def _build_apply_update_script(
         }}
         """
     ).strip()
+
+
+def _build_apply_file_update_script(
+    *,
+    current_pid: int,
+    install_root: Path,
+    executable_name: str,
+    stage_root: Path,
+    update_log_path: Path,
+) -> str:
+    install_root_literal = str(install_root)
+    executable_literal = str(executable_name)
+    stage_root_literal = str(stage_root)
+    update_log_literal = str(update_log_path)
+    return textwrap.dedent(
+        f"""
+        $ErrorActionPreference = "Stop"
+        $targetPid = {current_pid}
+        $installRoot = "{install_root_literal}"
+        $executableName = "{executable_literal}"
+        $stageRoot = "{stage_root_literal}"
+        $updateLogPath = "{update_log_literal}"
+        $filesRoot = Join-Path $stageRoot "files"
+        $planPath = Join-Path $stageRoot "file-update-plan.json"
+        $manifestPath = Join-Path $stageRoot "update-manifest.json"
+        $bundleTarget = Join-Path $installRoot "MU Unscramble Bot"
+        $relaunchPath = Join-Path $bundleTarget $executableName
+
+        function Write-UpdateLog([string]$message) {{
+            $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            $line = "[{0}] {1}" -f $stamp, $message
+            New-Item -ItemType Directory -Path (Split-Path -Parent $updateLogPath) -Force | Out-Null
+            Add-Content -LiteralPath $updateLogPath -Value $line
+        }}
+
+        function To-SystemPath([string]$relativePath) {{
+            return Join-Path $installRoot ($relativePath -replace '/', '\\')
+        }}
+
+        function To-StagedPath([string]$relativePath) {{
+            return Join-Path $filesRoot ($relativePath -replace '/', '\\')
+        }}
+
+        while (Get-Process -Id $targetPid -ErrorAction SilentlyContinue) {{
+            Start-Sleep -Milliseconds 500
+        }}
+        Start-Sleep -Seconds 2
+
+        try {{
+            Write-UpdateLog "Applying file update from $stageRoot."
+            $plan = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
+
+            foreach ($relativePath in $plan.stale_paths) {{
+                $targetPath = To-SystemPath $relativePath
+                if (Test-Path -LiteralPath $targetPath) {{
+                    Remove-Item -LiteralPath $targetPath -Force
+                    Write-UpdateLog "Removed stale file: $relativePath"
+                }}
+            }}
+
+            foreach ($relativePath in $plan.changed_files) {{
+                $sourcePath = To-StagedPath $relativePath
+                $targetPath = To-SystemPath $relativePath
+                $targetParent = Split-Path -Parent $targetPath
+                if (-not (Test-Path -LiteralPath $targetParent)) {{
+                    New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+                }}
+                Copy-Item -LiteralPath $sourcePath -Destination $targetPath -Force
+                Write-UpdateLog "Updated file: $relativePath"
+            }}
+
+            if (Test-Path -LiteralPath $manifestPath) {{
+                Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $installRoot "update-manifest.json") -Force
+            }}
+
+            if (Test-Path -LiteralPath $bundleTarget) {{
+                Get-ChildItem -LiteralPath $bundleTarget -Directory -Recurse |
+                    Sort-Object FullName -Descending |
+                    ForEach-Object {{
+                        if (-not (Get-ChildItem -LiteralPath $_.FullName -Force)) {{
+                            Remove-Item -LiteralPath $_.FullName -Force
+                        }}
+                    }}
+            }}
+
+            Write-UpdateLog "Relaunching updated executable from $relaunchPath."
+            Start-Process -FilePath $relaunchPath
+            Start-Sleep -Seconds 1
+            Write-UpdateLog "File update finished successfully."
+        }} catch {{
+            Write-UpdateLog "File update failed: $($_.Exception.Message)"
+            throw
+        }} finally {{
+            Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }}
+        """
+    ).strip()
+
+
+def _download_json(url: str, *, timeout_seconds: float) -> dict[str, object]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "mu-unscramble-bot",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("Expected a JSON object from the update server.")
+    return payload
+
+
+def _download_binary(url: str, destination: Path, *, timeout_seconds: float) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/octet-stream",
+            "User-Agent": "mu-unscramble-bot",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response, destination.open("wb") as handle:
+        while True:
+            chunk = response.read(1024 * 256)
+            if not chunk:
+                break
+            handle.write(chunk)
+
+
+def _list_managed_files(install_root: Path) -> dict[str, Path]:
+    managed: dict[str, Path] = {}
+    launcher = install_root / "Start MU Unscramble Bot.vbs"
+    if launcher.exists():
+        managed["Start MU Unscramble Bot.vbs"] = launcher
+
+    bundle_root = install_root / "MU Unscramble Bot"
+    if bundle_root.exists():
+        for path in bundle_root.rglob("*"):
+            if not path.is_file():
+                continue
+            managed[path.relative_to(install_root).as_posix()] = path
+
+    local_manifest = install_root / "update-manifest.json"
+    if local_manifest.exists():
+        managed["update-manifest.json"] = local_manifest
+    return managed
+
+
+def _file_matches_manifest(path: Path, entry: UpdateManifestFile) -> bool:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return False
+    if stat.st_size != entry.size:
+        return False
+    return _sha256_file(path) == entry.sha256
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _safe_version(value: str) -> Version | None:

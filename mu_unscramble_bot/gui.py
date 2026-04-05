@@ -20,6 +20,8 @@ from mu_unscramble_bot.updater import (
     download_release_asset,
     get_app_version,
     open_release_page,
+    prepare_file_update,
+    stage_windows_file_update,
     stage_windows_update,
 )
 from mu_unscramble_bot.window_target import extract_character_name, list_matching_windows
@@ -993,11 +995,26 @@ class DesktopApp:
 
     def _run_update_install(self, result: UpdateCheckResult) -> None:
         try:
-            self._message_queue.put(("log", f"Downloading {result.asset_name or result.latest_version}..."))
-            archive_path = download_release_asset(result)
-            self._message_queue.put(("log", f"Download complete: {archive_path.name}"))
-            self._message_queue.put(("log", "Staging update and preparing restart..."))
-            update_log_path = stage_windows_update(archive_path)
+            if result.manifest_asset_url:
+                self._message_queue.put(("log", f"Fetching update manifest for {result.latest_version}..."))
+                prepared = prepare_file_update(result)
+                if prepared.changed_count == 0 and prepared.stale_count == 0:
+                    self._message_queue.put(("log", "No file changes were needed for this update."))
+                else:
+                    self._message_queue.put(
+                        (
+                            "log",
+                            f"Prepared {prepared.changed_count} changed files and {prepared.stale_count} cleanup items.",
+                        )
+                    )
+                self._message_queue.put(("log", "Staging file-by-file update and preparing restart..."))
+                update_log_path = stage_windows_file_update(prepared)
+            else:
+                self._message_queue.put(("log", f"Downloading {result.asset_name or result.latest_version}..."))
+                archive_path = download_release_asset(result)
+                self._message_queue.put(("log", f"Download complete: {archive_path.name}"))
+                self._message_queue.put(("log", "Staging full-bundle update and preparing restart..."))
+                update_log_path = stage_windows_update(archive_path)
             self._message_queue.put(("log", f"Updater log: {update_log_path}"))
         except Exception as exc:
             self._message_queue.put(("update-install-error", f"Update install failed: {type(exc).__name__}: {exc}"))
