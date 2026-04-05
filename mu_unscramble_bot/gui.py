@@ -7,6 +7,7 @@ import queue
 import threading
 import traceback
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
 from mu_unscramble_bot.bot import MuUnscrambleBot
@@ -658,6 +659,11 @@ class DesktopApp:
             style.theme_use("clam")
         except Exception:
             pass
+        body_font = tkfont.nametofont("TkDefaultFont").copy()
+        body_font.configure(family="Segoe UI", size=10)
+        heading_font = tkfont.nametofont("TkHeadingFont").copy()
+        heading_font.configure(family="Segoe UI", size=10)
+        row_height = max(26, body_font.metrics("linespace") + 8)
         style.configure(
             "Bot.TCombobox",
             fieldbackground=CARD_BG,
@@ -667,6 +673,29 @@ class DesktopApp:
             bordercolor=CARD_BORDER,
             lightcolor=CARD_BORDER,
             darkcolor=CARD_BORDER,
+            relief="flat",
+        )
+        style.configure(
+            "Dup.Treeview",
+            font=body_font,
+            rowheight=row_height,
+            fieldbackground="#f5f7fa",
+            background="#f5f7fa",
+            foreground="#16202a",
+            bordercolor=CARD_BORDER,
+            lightcolor=CARD_BORDER,
+            darkcolor=CARD_BORDER,
+        )
+        style.map(
+            "Dup.Treeview",
+            background=[("selected", "#7ea6c9")],
+            foreground=[("selected", "#0b1620")],
+        )
+        style.configure(
+            "Dup.Treeview.Heading",
+            font=heading_font,
+            background="#dfe6ee",
+            foreground="#0b1620",
             relief="flat",
         )
 
@@ -1140,7 +1169,8 @@ class DesktopApp:
         window = tk.Toplevel(self.root)
         window.title(f"{APP_NAME} Duplicates")
         window.configure(bg=WINDOW_BG)
-        window.geometry("900x560")
+        window.geometry("980x620")
+        window.minsize(900, 560)
 
         search_var = tk.StringVar()
         status_var = tk.StringVar(value="Choose a duplicate group to review.")
@@ -1230,6 +1260,7 @@ class DesktopApp:
         group_list_frame.pack(fill="both", expand=True, pady=(8, 0))
         group_tree = ttk.Treeview(
             group_list_frame,
+            style="Dup.Treeview",
             columns=("kind", "key", "count"),
             show="headings",
             selectmode="browse",
@@ -1238,9 +1269,9 @@ class DesktopApp:
         group_tree.heading("kind", text="Type")
         group_tree.heading("key", text="Group")
         group_tree.heading("count", text="Rows")
-        group_tree.column("kind", width=92, anchor="w", stretch=False)
-        group_tree.column("key", width=210, anchor="w")
-        group_tree.column("count", width=56, anchor="center", stretch=False)
+        group_tree.column("kind", width=88, anchor="w", stretch=False)
+        group_tree.column("key", width=235, anchor="w")
+        group_tree.column("count", width=58, anchor="center", stretch=False)
         group_scrollbar = ttk.Scrollbar(group_list_frame, orient="vertical", command=group_tree.yview)
         group_tree.configure(yscrollcommand=group_scrollbar.set)
         group_tree.pack(side="left", fill="both", expand=True)
@@ -1260,6 +1291,7 @@ class DesktopApp:
 
         tree = ttk.Treeview(
             detail_card,
+            style="Dup.Treeview",
             columns=("scramble", "answer", "frequency"),
             show="headings",
             selectmode="extended",
