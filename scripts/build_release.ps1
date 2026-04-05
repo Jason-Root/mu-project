@@ -1,14 +1,27 @@
 param(
-    [string]$Version = "0.3.0"
+    [string]$Version = "0.3.1",
+    [string]$PythonPath = ""
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-$python = Join-Path $root ".venv\\Scripts\\python.exe"
-if (-not (Test-Path $python)) {
-    throw "Python virtual environment was not found at $python"
+$python = $PythonPath
+if (-not $python) {
+    $venvPython = Join-Path $root ".venv\\Scripts\\python.exe"
+    if (Test-Path $venvPython) {
+        $python = $venvPython
+    }
+}
+if (-not $python) {
+    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    if ($pythonCommand) {
+        $python = $pythonCommand.Source
+    }
+}
+if (-not $python) {
+    throw "No Python interpreter was found. Pass -PythonPath or create .venv\\Scripts\\python.exe."
 }
 
 & $python -m pip install pyinstaller
