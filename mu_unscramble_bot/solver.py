@@ -8,13 +8,13 @@ import re
 from pathlib import Path
 from typing import Protocol
 
-import geonamescache
 from openai import OpenAI
 
 from mu_unscramble_bot.config import BotConfig
 from mu_unscramble_bot.github_answer_sheet import GitHubAnswerSheetConfig
 from mu_unscramble_bot.memory_store import QuestionMemory
 from mu_unscramble_bot.models import Puzzle, SolverResult, normalize_letters
+from mu_unscramble_bot.paths import bundle_dir, resolve_user_path
 
 try:
     from wordfreq import top_n_list
@@ -52,13 +52,7 @@ class CapitalCitySolver:
     capitals_by_country: dict[str, str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        cache = geonamescache.GeonamesCache()
-        countries = cache.get_countries().values()
-        self.capitals_by_country = {
-            self._normalize_country_name(country["name"]): normalize_letters(country["capital"])
-            for country in countries
-            if country.get("capital")
-        }
+        self.capitals_by_country = self._load_country_capitals()
         self.capitals_by_country.update(
             {
                 "usa": "washington",
@@ -67,6 +61,10 @@ class CapitalCitySolver:
                 "uk": "london",
                 "great britain": "london",
                 "britain": "london",
+                "england": "london",
+                "scotland": "edinburgh",
+                "wales": "cardiff",
+                "northern ireland": "belfast",
                 "south korea": "seoul",
                 "north korea": "pyongyang",
                 "russia": "moscow",
@@ -114,6 +112,28 @@ class CapitalCitySolver:
     def _normalize_country_name(value: str) -> str:
         cleaned = re.sub(r"[^a-z0-9 ]+", " ", value.lower())
         return re.sub(r"\s+", " ", cleaned).strip()
+
+    @classmethod
+    def _load_country_capitals(cls) -> dict[str, str]:
+        for path in cls._candidate_paths():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                return {
+                    cls._normalize_country_name(str(country)): normalize_letters(str(capital))
+                    for country, capital in payload.items()
+                    if str(country).strip() and str(capital).strip()
+                }
+        return {}
+
+    @staticmethod
+    def _candidate_paths() -> tuple[Path, ...]:
+        return (
+            resolve_user_path("data/country_capitals.json"),
+            bundle_dir() / "data" / "country_capitals.json",
+        )
 
 
 @dataclass(slots=True)
