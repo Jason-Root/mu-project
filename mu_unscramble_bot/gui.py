@@ -1144,6 +1144,7 @@ class DesktopApp:
 
         search_var = tk.StringVar()
         status_var = tk.StringVar(value="Choose a duplicate group to review.")
+        count_var = tk.StringVar(value="")
         group_items: list[DuplicateGroup] = []
 
         container = tk.Frame(window, bg=WINDOW_BG, padx=16, pady=16)
@@ -1217,22 +1218,32 @@ class DesktopApp:
             fg=TEXT_SOFT,
             font=("Segoe UI", 10, "bold"),
         ).pack(anchor="w")
+        tk.Label(
+            groups_card,
+            textvariable=count_var,
+            bg=CARD_BG,
+            fg="#79c0ff",
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(4, 0))
 
         group_list_frame = tk.Frame(groups_card, bg=CARD_BG)
         group_list_frame.pack(fill="both", expand=True, pady=(8, 0))
-        group_listbox = tk.Listbox(
+        group_tree = ttk.Treeview(
             group_list_frame,
-            bg=CARD_BG,
-            fg=TEXT_MAIN,
-            insertbackground=TEXT_MAIN,
-            relief="flat",
-            font=("Segoe UI", 10),
-            activestyle="none",
-            exportselection=False,
+            columns=("kind", "key", "count"),
+            show="headings",
+            selectmode="browse",
+            height=16,
         )
-        group_scrollbar = ttk.Scrollbar(group_list_frame, orient="vertical", command=group_listbox.yview)
-        group_listbox.configure(yscrollcommand=group_scrollbar.set, width=38, height=18)
-        group_listbox.pack(side="left", fill="both", expand=True)
+        group_tree.heading("kind", text="Type")
+        group_tree.heading("key", text="Group")
+        group_tree.heading("count", text="Rows")
+        group_tree.column("kind", width=92, anchor="w", stretch=False)
+        group_tree.column("key", width=210, anchor="w")
+        group_tree.column("count", width=56, anchor="center", stretch=False)
+        group_scrollbar = ttk.Scrollbar(group_list_frame, orient="vertical", command=group_tree.yview)
+        group_tree.configure(yscrollcommand=group_scrollbar.set)
+        group_tree.pack(side="left", fill="both", expand=True)
         group_scrollbar.pack(side="right", fill="y")
 
         detail_card = self._card(body)
@@ -1269,10 +1280,13 @@ class DesktopApp:
         action_row.pack(fill="x", pady=(12, 0))
 
         def selected_group() -> DuplicateGroup | None:
-            selection = group_listbox.curselection()
+            selection = group_tree.selection()
             if not selection:
                 return None
-            index = int(selection[0])
+            try:
+                index = int(selection[0])
+            except Exception:
+                return None
             if index < 0 or index >= len(group_items):
                 return None
             return group_items[index]
@@ -1308,6 +1322,19 @@ class DesktopApp:
                     values=(record.scrambled_letters, record.answer, record.frequency),
                 )
 
+        def select_group(index: int) -> None:
+            if index < 0 or index >= len(group_items):
+                if group_tree.selection():
+                    group_tree.selection_remove(group_tree.selection())
+                refresh_group_rows()
+                return
+            item_id = str(index)
+            if group_tree.exists(item_id):
+                group_tree.selection_set(item_id)
+                group_tree.focus(item_id)
+                group_tree.see(item_id)
+            refresh_group_rows()
+
         def refresh_groups() -> None:
             nonlocal group_items
             previous_group = selected_group()
@@ -1318,9 +1345,21 @@ class DesktopApp:
                 status_var.set(f"Could not load duplicates: {type(exc).__name__}: {exc}")
                 group_items = []
 
-            group_listbox.delete(0, "end")
-            for group in group_items:
-                group_listbox.insert("end", group.label)
+            for item_id in group_tree.get_children():
+                group_tree.delete(item_id)
+
+            count_var.set(f"{len(group_items)} groups found")
+            for index, group in enumerate(group_items):
+                group_tree.insert(
+                    "",
+                    "end",
+                    iid=str(index),
+                    values=(
+                        "Scramble" if group.kind == "scramble" else "Answer",
+                        group.key,
+                        len(group.records),
+                    ),
+                )
 
             if not group_items:
                 if not status_var.get().startswith("Could not load duplicates:"):
@@ -1335,10 +1374,7 @@ class DesktopApp:
                         select_index = index
                         break
 
-            group_listbox.selection_clear(0, "end")
-            group_listbox.selection_set(select_index)
-            group_listbox.activate(select_index)
-            refresh_group_rows()
+            select_group(select_index)
 
         def keep_selected() -> None:
             group = selected_group()
@@ -1378,7 +1414,7 @@ class DesktopApp:
         self._make_button(action_row, "Remove Selected", remove_selected, accent=RED).pack(side="left", padx=(8, 0))
         self._make_button(action_row, "Refresh", refresh_groups, accent="#345369").pack(side="left", padx=(8, 0))
 
-        group_listbox.bind("<<ListboxSelect>>", lambda _event: refresh_group_rows())
+        group_tree.bind("<<TreeviewSelect>>", lambda _event: refresh_group_rows())
         tree.bind("<Double-1>", lambda _event: keep_selected())
         window.bind("<Return>", lambda _event: keep_selected())
 
