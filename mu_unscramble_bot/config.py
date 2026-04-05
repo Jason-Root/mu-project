@@ -72,9 +72,9 @@ class BotConfig:
     openai_reasoning_effort: str = ""
     online_solver_timeout_seconds: float = 2.0
     openai_send_hint: bool = False
-    update_repository: str = "Jason-Root/mu-unscramble-bot"
+    update_repository: str = "Jason-Root/mu-project"
     github_answer_sheet_enabled: bool = True
-    github_answer_sheet_repository: str = "Jason-Root/mu-unscramble-bot"
+    github_answer_sheet_repository: str = "Jason-Root/mu-project"
     github_answer_sheet_branch: str = "main"
     github_answer_sheet_path: str = "data/question_memory.csv"
     github_answer_sheet_sync_interval_seconds: float = 30.0

@@ -2,7 +2,7 @@
 
 GitHub project:
 
-- Repository: `https://github.com/Jason-Root/mu-unscramble-bot`
+- Repository: `https://github.com/Jason-Root/mu-project`
 
 This project watches the middle of the screen for the yellow MU Online event text, extracts the current `Round`, `scrambled word`, and `Hint`, solves it, and can submit the answer back into the game chat.
 
@@ -97,7 +97,7 @@ Community/shared answer sheet:
 
 ```json
 "github_answer_sheet_enabled": true,
-"github_answer_sheet_repository": "Jason-Root/mu-unscramble-bot",
+"github_answer_sheet_repository": "Jason-Root/mu-project",
 "github_answer_sheet_branch": "main",
 "github_answer_sheet_path": "data/question_memory.csv",
 "github_answer_sheet_sync_interval_seconds": 30.0
