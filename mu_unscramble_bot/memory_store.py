@@ -99,10 +99,12 @@ class QuestionMemory:
         fuzzy_match: bool = True,
         fuzzy_cutoff: float = 0.96,
         github_sync: GitHubAnswerSheetConfig | None = None,
+        auto_sync_from_github: bool = True,
     ) -> None:
         self.path = Path(path)
         self.fuzzy_match = fuzzy_match
         self.fuzzy_cutoff = fuzzy_cutoff
+        self.auto_sync_from_github = auto_sync_from_github
         self.records: list[MemoryRecord] = []
         self._last_file_stamp: tuple[int, int] | None = None
         self._lock_path = self.path.with_suffix(self.path.suffix + ".lock")
@@ -388,7 +390,8 @@ class QuestionMemory:
             return
 
     def _reload_if_changed(self) -> None:
-        self._sync_from_github_if_due()
+        if self.auto_sync_from_github:
+            self._sync_from_github_if_due()
         self._load()
 
     def _read_records_from_disk(self) -> tuple[list[MemoryRecord], bool]:

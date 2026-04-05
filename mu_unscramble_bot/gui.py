@@ -1132,7 +1132,11 @@ class DesktopApp:
                 commit_message=config.github_answer_sheet_commit_message,
             )
 
-        memory = QuestionMemory(path=config.question_memory_path, github_sync=github_sync)
+        memory = QuestionMemory(
+            path=config.question_memory_path,
+            github_sync=github_sync,
+            auto_sync_from_github=False,
+        )
         window = tk.Toplevel(self.root)
         window.title(f"{APP_NAME} Duplicates")
         window.configure(bg=WINDOW_BG)
@@ -1308,14 +1312,19 @@ class DesktopApp:
             nonlocal group_items
             previous_group = selected_group()
             previous_key = (previous_group.kind, previous_group.key) if previous_group is not None else None
-            group_items = memory.duplicate_groups(search_var.get().strip())
+            try:
+                group_items = memory.duplicate_groups(search_var.get().strip())
+            except Exception as exc:
+                status_var.set(f"Could not load duplicates: {type(exc).__name__}: {exc}")
+                group_items = []
 
             group_listbox.delete(0, "end")
             for group in group_items:
                 group_listbox.insert("end", group.label)
 
             if not group_items:
-                status_var.set("No duplicates found.")
+                if not status_var.get().startswith("Could not load duplicates:"):
+                    status_var.set("No duplicates found.")
                 refresh_group_rows()
                 return
 
