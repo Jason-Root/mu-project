@@ -12,9 +12,16 @@ from tkinter import messagebox, ttk
 from mu_unscramble_bot.bot import MuUnscrambleBot
 from mu_unscramble_bot.config import BotConfig, load_config, load_env_settings, save_config, save_env_settings
 from mu_unscramble_bot.overlay import OverlayPayload
-from mu_unscramble_bot.paths import APP_NAME, user_data_dir
+from mu_unscramble_bot.paths import APP_NAME, is_frozen, user_data_dir
 from mu_unscramble_bot.privilege import is_current_process_elevated
-from mu_unscramble_bot.updater import UpdateCheckResult, check_for_updates, get_app_version, open_release_page
+from mu_unscramble_bot.updater import (
+    UpdateCheckResult,
+    check_for_updates,
+    download_release_asset,
+    get_app_version,
+    open_release_page,
+    stage_windows_update,
+)
 from mu_unscramble_bot.window_target import extract_character_name, list_matching_windows
 
 
@@ -39,6 +46,12 @@ class ClientChoice:
     match_index: int
     character_name: str
     title: str
+
+
+@dataclass(slots=True)
+class UpdateMessage:
+    result: UpdateCheckResult
+    silent_if_current: bool = False
 
 
 def _speed_to_values(speed: int) -> tuple[float, float]:
@@ -91,6 +104,8 @@ class SettingsDialog:
         self.api_key_var = tk.StringVar(value=self.env_settings.get("OPENAI_API_KEY", ""))
         self.model_var = tk.StringVar(value=self.env_settings.get("OPENAI_MODEL", self.config.openai_model))
         self.base_url_var = tk.StringVar(value=self.env_settings.get("OPENAI_BASE_URL", self.config.openai_base_url or ""))
+        self.community_sync_var = tk.BooleanVar(value=self.config.github_answer_sheet_enabled)
+        self.github_token_var = tk.StringVar(value=self.env_settings.get("GITHUB_TOKEN", ""))
         self.speed_var = tk.IntVar(value=_values_to_speed(self.config.typing_interval_seconds))
         self.speed_text_var = tk.StringVar()
 
@@ -194,6 +209,53 @@ class SettingsDialog:
             font=("Segoe UI", 10, "bold"),
         ).pack(anchor="w", pady=(6, 0))
 
+        github_card = self._card(container)
+        github_card.pack(fill="x", pady=(16, 0))
+        self._row_label(github_card, "Community Answer Sync").pack(anchor="w")
+        tk.Label(
+            github_card,
+            text="Answers can sync through GitHub so every PC can pull new solves.",
+            bg=CARD_BG,
+            fg=TEXT_SOFT,
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(4, 0))
+        tk.Label(
+            github_card,
+            text=f"Repository: {self.config.github_answer_sheet_repository}",
+            bg=CARD_BG,
+            fg="#79c0ff",
+            font=("Consolas", 9),
+        ).pack(anchor="w", pady=(6, 0))
+        tk.Checkbutton(
+            github_card,
+            text="Enable GitHub community sync",
+            variable=self.community_sync_var,
+            bg=CARD_BG,
+            fg=TEXT_MAIN,
+            activebackground=CARD_BG,
+            activeforeground=TEXT_MAIN,
+            selectcolor="#0b1620",
+            font=("Segoe UI", 10),
+        ).pack(anchor="w", pady=(10, 0))
+        self._row_label(github_card, "GitHub Token").pack(anchor="w", pady=(12, 0))
+        tk.Entry(
+            github_card,
+            textvariable=self.github_token_var,
+            bg="#0b1620",
+            fg=TEXT_MAIN,
+            insertbackground=TEXT_MAIN,
+            relief="flat",
+            font=("Consolas", 10),
+            show="*",
+        ).pack(fill="x", pady=(8, 0))
+        tk.Label(
+            github_card,
+            text="Leave blank for read-only sync. Add a token to publish new answers back to GitHub.",
+            bg=CARD_BG,
+            fg=TEXT_SOFT,
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(6, 0))
+
         actions = tk.Frame(container, bg=WINDOW_BG)
         actions.pack(fill="x", pady=(18, 0))
         tk.Button(
@@ -279,6 +341,7 @@ class SettingsDialog:
         config.show_overlay = False
         config.test_api_on_startup = False
         config.typing_interval_seconds, config.key_hold_seconds = _speed_to_values(self.speed_var.get())
+        config.github_answer_sheet_enabled = self.community_sync_var.get()
         save_config(config)
 
         if provider == PROVIDER_DISABLED:
@@ -314,6 +377,7 @@ class SettingsDialog:
                 "OPENAI_APP_TITLE": APP_NAME,
             }
 
+        env_updates["GITHUB_TOKEN"] = self.github_token_var.get().strip()
         save_env_settings(env_updates)
         self.parent.reload_settings_badges()
         self.parent.append_log("Settings saved.")
@@ -354,6 +418,8 @@ class DesktopApp:
         self._refresh_clients(initial=True)
         self.reload_settings_badges()
         self.root.after(120, self._pump_messages)
+        if is_frozen():
+            self.root.after(1600, lambda: self._start_update_check(silent_if_current=True))
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_styles(self) -> None:
@@ -548,7 +614,8 @@ class DesktopApp:
         provider = _detect_provider(config)
         provider_text = f"API: {provider}" if provider != PROVIDER_DISABLED else "API: Off"
         speed = _values_to_speed(config.typing_interval_seconds)
-        self.badges_var.set(f"{submit_mode}  |  {provider_text}  |  Typing speed {speed}/10")
+        community_text = "Community Sync ON" if config.github_answer_sheet_enabled else "Community Sync OFF"
+        self.badges_var.set(f"{submit_mode}  |  {provider_text}  |  {community_text}  |  Typing speed {speed}/10")
 
     def _refresh_clients(self, initial: bool = False) -> None:
         config = load_config()
@@ -656,20 +723,39 @@ class DesktopApp:
         if self._bot is not None:
             self._bot.request_stop()
 
-    def _start_update_check(self) -> None:
+    def _start_update_check(self, *, silent_if_current: bool = False) -> None:
         config = load_config()
         self.append_log("Checking GitHub releases for updates...")
         thread = threading.Thread(
             target=self._run_update_check,
-            args=(config.update_repository,),
+            args=(config.update_repository, silent_if_current),
             name="mu-update-check",
             daemon=True,
         )
         thread.start()
 
-    def _run_update_check(self, repository: str) -> None:
+    def _run_update_check(self, repository: str, silent_if_current: bool) -> None:
         result = check_for_updates(repository)
-        self._message_queue.put(("update", result))
+        self._message_queue.put(("update", UpdateMessage(result=result, silent_if_current=silent_if_current)))
+
+    def _start_update_install(self, result: UpdateCheckResult) -> None:
+        self.append_log(f"Downloading version {result.latest_version} from GitHub...")
+        thread = threading.Thread(
+            target=self._run_update_install,
+            args=(result,),
+            name="mu-update-install",
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_update_install(self, result: UpdateCheckResult) -> None:
+        try:
+            archive_path = download_release_asset(result)
+            stage_windows_update(archive_path)
+        except Exception as exc:
+            self._message_queue.put(("update-install-error", f"Update install failed: {type(exc).__name__}: {exc}"))
+            return
+        self._message_queue.put(("update-staged", result.latest_version))
 
     def _queue_status(self, payload: OverlayPayload) -> None:
         self._message_queue.put(("status", payload))
@@ -707,27 +793,49 @@ class DesktopApp:
                 self._reset_running_state()
                 messagebox.showerror(APP_NAME, "The bot stopped unexpectedly. See the Activity Log for details.")
             elif kind == "update":
-                assert isinstance(payload, UpdateCheckResult)
-                self._handle_update_result(payload)
+                assert isinstance(payload, UpdateMessage)
+                self._handle_update_result(payload.result, silent_if_current=payload.silent_if_current)
+            elif kind == "update-install-error":
+                assert isinstance(payload, str)
+                self.append_log(payload)
+                messagebox.showerror(APP_NAME, payload)
+            elif kind == "update-staged":
+                assert isinstance(payload, str)
+                self.append_log(f"Version {payload} downloaded. Restarting into the new build...")
+                messagebox.showinfo(
+                    APP_NAME,
+                    f"Version {payload} is ready.\n\nThe app will close and relaunch into the new build now.",
+                )
+                if self._bot is not None:
+                    self._bot.request_stop()
+                self.root.after(120, self.root.destroy)
 
         self.root.after(120, self._pump_messages)
 
-    def _handle_update_result(self, result: UpdateCheckResult) -> None:
+    def _handle_update_result(self, result: UpdateCheckResult, *, silent_if_current: bool = False) -> None:
         if result.error:
             self.append_log(result.error)
-            messagebox.showinfo(APP_NAME, result.error)
+            if not silent_if_current:
+                messagebox.showinfo(APP_NAME, result.error)
             return
 
         if not result.available:
-            self.append_log(f"No update found. Current version is {result.current_version}.")
-            messagebox.showinfo(APP_NAME, f"You are up to date on version {result.current_version}.")
+            if not silent_if_current:
+                self.append_log(f"No update found. Current version is {result.current_version}.")
+                messagebox.showinfo(APP_NAME, f"You are up to date on version {result.current_version}.")
             return
 
         self.append_log(f"Update available: {result.latest_version}")
-        open_page = messagebox.askyesno(
-            APP_NAME,
-            f"Version {result.latest_version} is available.\n\nOpen the release page now?",
-        )
+        if result.asset_url and is_frozen():
+            install_now = messagebox.askyesno(
+                APP_NAME,
+                f"Version {result.latest_version} is available.\n\nDownload and install it now?",
+            )
+            if install_now:
+                self._start_update_install(result)
+            return
+
+        open_page = messagebox.askyesno(APP_NAME, f"Version {result.latest_version} is available.\n\nOpen the release page now?")
         if open_page:
             open_release_page(result.release_url)
 

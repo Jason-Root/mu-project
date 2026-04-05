@@ -103,7 +103,7 @@ Community/shared answer sheet:
 "github_answer_sheet_sync_interval_seconds": 30.0
 ```
 
-- Then put a GitHub fine-grained or classic token with repo content write access in `.env`:
+- Then put a GitHub fine-grained or classic token with repo content write access in `.env`, or save it through the app Settings window:
 
 ```env
 GITHUB_TOKEN=your_github_token_here
@@ -117,11 +117,13 @@ Run the live bot with auto-submit enabled:
 .\.venv\Scripts\python -m mu_unscramble_bot run
 ```
 
-Double-click launcher:
+Desktop app:
 
-- You can start the bot by opening [Start MU Unscramble Bot.cmd](d:/project/Start%20MU%20Unscramble%20Bot.cmd)
-- It gives you a small menu for `dry-run`, `live`, or `test-api`
-- `dry-run` and `live` now show the visible Divine MU clients and let you choose the window index at startup
+- Start the packaged app with `Start MU Unscramble Bot.vbs` or the desktop shortcut.
+- The app opens straight into the live GUI with no command prompt.
+- Pick the character window you want to watch, then press `Start Watching`.
+- Use `Settings` for per-PC API options, typing speed, and GitHub community sync.
+- Use `Updates` to check GitHub Releases, download the new Windows build, and relaunch into it.
 
 ## Config notes
 
