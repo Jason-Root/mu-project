@@ -39,6 +39,10 @@ def letters_match(answer: str, scramble: str) -> bool:
     return sorted(normalize_letters(answer)) == sorted(normalize_letters(scramble))
 
 
+def scramble_signature(value: str) -> str:
+    return "".join(sorted(normalize_letters(value)))
+
+
 @dataclass(slots=True)
 class MemoryRecord:
     scrambled_letters: str
@@ -86,9 +90,7 @@ class DuplicateGroup:
 
     @property
     def label(self) -> str:
-        if self.kind == "scramble":
-            return f"Scramble conflict: {self.key} ({len(self.records)} answers)"
-        return f"Answer conflict: {self.key} ({len(self.records)} scrambles)"
+        return f"Letter conflict: {self.key} ({len(self.records)} answers)"
 
 
 class QuestionMemory:
@@ -123,16 +125,25 @@ class QuestionMemory:
 
     def lookup(self, puzzle: Puzzle) -> SolverResult | None:
         self._reload_if_changed()
-        matches = [record for record in self.records if record.scrambled_letters == puzzle.normalized_scramble]
+        signature = scramble_signature(puzzle.normalized_scramble)
+        matches = [record for record in self.records if scramble_signature(record.scrambled_letters) == signature]
         if not matches:
             return None
 
-        matches.sort(key=lambda record: (record.frequency, record.answer), reverse=True)
-        best = matches[0]
-        second = matches[1] if len(matches) > 1 else None
-        if second is not None and second.frequency == best.frequency and second.answer != best.answer:
+        frequency_by_answer: dict[str, int] = {}
+        for record in matches:
+            frequency_by_answer[record.answer] = frequency_by_answer.get(record.answer, 0) + record.frequency
+
+        ranked = sorted(
+            frequency_by_answer.items(),
+            key=lambda item: (item[1], item[0]),
+            reverse=True,
+        )
+        best_answer, best_frequency = ranked[0]
+        second = ranked[1] if len(ranked) > 1 else None
+        if second is not None and second[0] != best_answer and second[1] == best_frequency:
             return None
-        return SolverResult(answer=best.answer, method="memory", confidence=1.0)
+        return SolverResult(answer=best_answer, method="memory", confidence=1.0)
 
     def remember(self, puzzle: Puzzle, result: SolverResult) -> None:
         scrambled_letters = puzzle.normalized_scramble
@@ -143,8 +154,9 @@ class QuestionMemory:
             return
 
         self._reload_if_changed()
+        signature = scramble_signature(scrambled_letters)
         for record in self.records:
-            if record.scrambled_letters != scrambled_letters:
+            if scramble_signature(record.scrambled_letters) != signature:
                 continue
             if record.answer != answer:
                 continue
@@ -160,38 +172,22 @@ class QuestionMemory:
         needle = normalize_letters(query)
 
         lines: list[str] = []
-        by_scramble: dict[str, set[str]] = {}
-        by_answer: dict[str, set[str]] = {}
+        by_signature: dict[str, set[str]] = {}
         for record in self.records:
-            by_scramble.setdefault(record.scrambled_letters, set()).add(record.answer)
-            by_answer.setdefault(record.answer, set()).add(record.scrambled_letters)
+            by_signature.setdefault(scramble_signature(record.scrambled_letters), set()).add(record.answer)
 
-        scramble_duplicates = {
+        signature_duplicates = {
             scramble: sorted(answers)
-            for scramble, answers in by_scramble.items()
+            for scramble, answers in by_signature.items()
             if len(answers) > 1
         }
-        answer_duplicates = {
-            answer: sorted(scrambles)
-            for answer, scrambles in by_answer.items()
-            if len(scrambles) > 1
-        }
 
-        if scramble_duplicates:
-            lines.append("Same scramble mapped to multiple answers:")
-            for scramble, answers in sorted(scramble_duplicates.items()):
+        if signature_duplicates:
+            lines.append("Same letter set mapped to multiple answers:")
+            for scramble, answers in sorted(signature_duplicates.items()):
                 if needle and needle not in scramble and not any(needle in answer for answer in answers):
                     continue
                 lines.append(f"{scramble} -> {', '.join(answers)}")
-
-        if answer_duplicates:
-            if lines:
-                lines.append("")
-            lines.append("Same answer seen under multiple scramble reads:")
-            for answer, scrambles in sorted(answer_duplicates.items()):
-                if needle and needle not in answer and not any(needle in scramble for scramble in scrambles):
-                    continue
-                lines.append(f"{answer} <- {', '.join(scrambles)}")
 
         return lines
 
@@ -200,41 +196,24 @@ class QuestionMemory:
         needle = normalize_letters(query)
 
         groups: list[DuplicateGroup] = []
-        by_scramble: dict[str, list[MemoryRecord]] = {}
-        by_answer: dict[str, list[MemoryRecord]] = {}
+        by_signature: dict[str, list[MemoryRecord]] = {}
         for record in self.records:
-            by_scramble.setdefault(record.scrambled_letters, []).append(record)
-            by_answer.setdefault(record.answer, []).append(record)
+            by_signature.setdefault(scramble_signature(record.scrambled_letters), []).append(record)
 
-        for scramble, records in sorted(by_scramble.items()):
+        for signature, records in sorted(by_signature.items()):
             unique_answers = {record.answer for record in records}
             if len(unique_answers) <= 1:
                 continue
-            if needle and needle not in scramble and not any(needle in record.answer for record in records):
+            if needle and needle not in signature and not any(needle in record.answer for record in records):
                 continue
             groups.append(
                 DuplicateGroup(
-                    kind="scramble",
-                    key=scramble,
+                    kind="signature",
+                    key=signature,
                     records=tuple(sorted(records, key=lambda item: (-item.frequency, item.answer))),
                 )
             )
-
-        for answer, records in sorted(by_answer.items()):
-            unique_scrambles = {record.scrambled_letters for record in records}
-            if len(unique_scrambles) <= 1:
-                continue
-            if needle and needle not in answer and not any(needle in record.scrambled_letters for record in records):
-                continue
-            groups.append(
-                DuplicateGroup(
-                    kind="answer",
-                    key=answer,
-                    records=tuple(sorted(records, key=lambda item: (-item.frequency, item.scrambled_letters))),
-                )
-            )
-
-        groups.sort(key=lambda group: (group.kind, group.key))
+        groups.sort(key=lambda group: group.key)
         return groups
 
     def delete_records(self, rows: list[tuple[str, str]]) -> int:
@@ -255,7 +234,7 @@ class QuestionMemory:
         )
 
     def keep_record_for_group(self, group_kind: str, group_key: str, keep_row: tuple[str, str]) -> int:
-        normalized_group_key = normalize_letters(group_key)
+        normalized_group_key = scramble_signature(group_key) if group_kind == "signature" else normalize_letters(group_key)
         keep_scramble = normalize_letters(keep_row[0])
         keep_answer = normalize_letters(keep_row[1])
         if not normalized_group_key or not keep_scramble or not keep_answer:
@@ -264,11 +243,8 @@ class QuestionMemory:
         def mutate(records: list[MemoryRecord]) -> list[MemoryRecord]:
             kept: list[MemoryRecord] = []
             for record in records:
-                if group_kind == "scramble" and record.scrambled_letters == normalized_group_key:
+                if group_kind == "signature" and scramble_signature(record.scrambled_letters) == normalized_group_key:
                     if record.answer != keep_answer:
-                        continue
-                elif group_kind == "answer" and record.answer == normalized_group_key:
-                    if record.scrambled_letters != keep_scramble:
                         continue
                 kept.append(record)
             return kept
@@ -511,7 +487,7 @@ class QuestionMemory:
             answer = normalize_letters(record.answer)
             if not scrambled_letters or not answer:
                 continue
-            key = (scrambled_letters, answer)
+            key = (scramble_signature(scrambled_letters), answer)
             existing = merged.get(key)
             if existing is None:
                 merged[key] = MemoryRecord(
@@ -520,11 +496,13 @@ class QuestionMemory:
                     frequency=max(1, int(record.frequency)),
                 )
                 continue
+            if scrambled_letters < existing.scrambled_letters:
+                existing.scrambled_letters = scrambled_letters
             existing.frequency += _normalize_frequency(record.frequency)
 
         return sorted(
             merged.values(),
-            key=lambda item: (-item.frequency, item.scrambled_letters, item.answer),
+            key=lambda item: (-item.frequency, scramble_signature(item.scrambled_letters), item.answer),
         )
 
 

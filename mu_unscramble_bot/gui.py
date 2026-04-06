@@ -1188,7 +1188,7 @@ class DesktopApp:
         ).pack(anchor="w")
         tk.Label(
             container,
-            text="Find OCR mismatches where the same scramble maps to multiple answers or the same answer appears under multiple scrambles.",
+            text="Find real conflicts where one letter set has been saved with multiple answers.",
             bg=WINDOW_BG,
             fg=TEXT_SOFT,
             font=("Segoe UI", 9),
@@ -1261,16 +1261,14 @@ class DesktopApp:
         group_tree = ttk.Treeview(
             group_list_frame,
             style="Dup.Treeview",
-            columns=("kind", "key", "count"),
+            columns=("key", "count"),
             show="headings",
             selectmode="browse",
             height=16,
         )
-        group_tree.heading("kind", text="Type")
-        group_tree.heading("key", text="Group")
+        group_tree.heading("key", text="Letter Set")
         group_tree.heading("count", text="Rows")
-        group_tree.column("kind", width=88, anchor="w", stretch=False)
-        group_tree.column("key", width=235, anchor="w")
+        group_tree.column("key", width=300, anchor="w")
         group_tree.column("count", width=58, anchor="center", stretch=False)
         group_scrollbar = ttk.Scrollbar(group_list_frame, orient="vertical", command=group_tree.yview)
         group_tree.configure(yscrollcommand=group_scrollbar.set)
@@ -1341,10 +1339,7 @@ class DesktopApp:
                 status_var.set("Choose a duplicate group to review.")
                 return
 
-            if group.kind == "scramble":
-                status_var.set(f"Scramble {group.key} has multiple answers. Keep one or remove bad OCR rows.")
-            else:
-                status_var.set(f"Answer {group.key} appears under multiple scrambles. Keep one or remove bad OCR rows.")
+            status_var.set(f"Letter set {group.key} has multiple answers. Keep one or remove bad OCR rows.")
 
             for record in group.records:
                 tree.insert(
@@ -1386,11 +1381,7 @@ class DesktopApp:
                     "",
                     "end",
                     iid=str(index),
-                    values=(
-                        "Scramble" if group.kind == "scramble" else "Answer",
-                        group.key,
-                        len(group.records),
-                    ),
+                    values=(group.key, len(group.records)),
                 )
 
             if not group_items:
