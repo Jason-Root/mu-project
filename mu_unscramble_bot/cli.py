@@ -98,7 +98,7 @@ def debug_screen(config: BotConfig, output_dir: str) -> int:
 
     reader = YellowTextReader(config)
     try:
-        capture = reader.read_from_screen()
+        capture = reader.read_from_screen(include_variants=True)
     finally:
         reader.close()
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import threading
 from typing import Any
+import zlib
 
 import cv2
 import mss
@@ -30,6 +31,8 @@ class YellowTextReader:
         self._ocr = RapidOCR()
         self._screen: Any | None = None
         self._screen_owner_thread_id: int | None = None
+        self._last_mask_signature: int | None = None
+        self._last_lines: list[str] = []
         self._warm_fast_recognizer()
 
     def close(self) -> None:
@@ -41,11 +44,11 @@ class YellowTextReader:
             self._screen = None
             self._screen_owner_thread_id = None
 
-    def read_from_screen(self) -> CaptureResult:
+    def read_from_screen(self, *, include_variants: bool = False) -> CaptureResult:
         screen = self._ensure_screen()
         region = self._resolve_live_region(screen)
         frame = np.array(screen.grab(region), dtype=np.uint8)[:, :, :3]
-        return self._analyze_frame(frame, region)
+        return self._analyze_frame(frame, region, include_variants=include_variants)
 
     def read_from_image(self, image_path: str | Path) -> CaptureResult:
         image = cv2.imread(str(image_path))
@@ -57,7 +60,7 @@ class YellowTextReader:
             region["top"] : region["top"] + region["height"],
             region["left"] : region["left"] + region["width"],
         ]
-        return self._analyze_frame(crop, region)
+        return self._analyze_frame(crop, region, include_variants=True)
 
     def _resolve_region(self, width: int, height: int, left: int, top: int) -> dict[str, int]:
         center_x = left + (width // 2) + self.config.center_offset_x
@@ -111,11 +114,41 @@ class YellowTextReader:
         self._screen_owner_thread_id = current_thread_id
         return self._screen
 
-    def _analyze_frame(self, frame: np.ndarray, region: dict[str, int]) -> CaptureResult:
+    def _analyze_frame(
+        self,
+        frame: np.ndarray,
+        region: dict[str, int],
+        *,
+        include_variants: bool,
+    ) -> CaptureResult:
         mask = self._yellow_mask(frame)
         ocr_frame, ocr_mask = self._crop_to_mask_bounds(frame, mask)
-        variants = self._build_variants(ocr_frame, ocr_mask)
-        lines = self._extract_lines(frame, mask, variants)
+        if cv2.countNonZero(ocr_mask) < self._minimum_yellow_pixels(ocr_mask):
+            variants = self._build_variants(ocr_frame, ocr_mask) if include_variants else {}
+            self._last_mask_signature = None
+            self._last_lines = []
+            return CaptureResult(region=region, frame=frame, mask=mask, variants=variants, lines=[])
+
+        mask_signature = self._mask_signature(ocr_mask)
+        if not include_variants and self._last_mask_signature == mask_signature:
+            return CaptureResult(
+                region=region,
+                frame=frame,
+                mask=mask,
+                variants={},
+                lines=list(self._last_lines),
+            )
+
+        lines, variants = self._extract_lines(
+            frame,
+            mask,
+            ocr_frame,
+            ocr_mask,
+            include_variants=include_variants,
+        )
+        if not include_variants:
+            self._last_mask_signature = mask_signature
+            self._last_lines = list(lines)
         return CaptureResult(region=region, frame=frame, mask=mask, variants=variants, lines=lines)
 
     def _yellow_mask(self, frame: np.ndarray) -> np.ndarray:
@@ -157,12 +190,18 @@ class YellowTextReader:
         self,
         frame: np.ndarray,
         mask: np.ndarray,
-        variants: dict[str, np.ndarray],
-    ) -> list[str]:
+        ocr_frame: np.ndarray,
+        ocr_mask: np.ndarray,
+        *,
+        include_variants: bool,
+    ) -> tuple[list[str], dict[str, np.ndarray]]:
         fast_lines = self._extract_lines_from_strips(frame, mask)
         if fast_lines:
-            return fast_lines
-        return self._extract_lines_with_detector(variants)
+            variants = self._build_variants(ocr_frame, ocr_mask) if include_variants else {}
+            return fast_lines, variants
+
+        variants = self._build_variants(ocr_frame, ocr_mask)
+        return self._extract_lines_with_detector(variants), variants
 
     def _extract_lines_from_strips(self, frame: np.ndarray, mask: np.ndarray) -> list[str]:
         strips = self._extract_line_strips(frame, mask)
@@ -308,6 +347,16 @@ class YellowTextReader:
             self._ocr.text_rec(blank)
         except Exception:
             pass
+
+    @staticmethod
+    def _minimum_yellow_pixels(mask: np.ndarray) -> int:
+        area = max(1, int(mask.shape[0] * mask.shape[1]))
+        return max(32, area // 1200)
+
+    @staticmethod
+    def _mask_signature(mask: np.ndarray) -> int:
+        reduced = cv2.resize(mask, (64, 24), interpolation=cv2.INTER_AREA)
+        return zlib.adler32(reduced.tobytes())
 
     @staticmethod
     def _clean_text(text: str) -> str:
