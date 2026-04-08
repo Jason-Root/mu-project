@@ -70,9 +70,11 @@ def get_app_version() -> str:
 def check_for_updates(repository: str, *, timeout_seconds: float = 8.0) -> UpdateCheckResult:
     current = get_app_version()
     repository = repository.strip().strip("/")
+    fallback_release_url = _build_release_page_url(repository) if repository else ""
     if not repository:
         return UpdateCheckResult(
             current_version=current,
+            release_url=fallback_release_url,
             error="Update repository is not configured yet.",
         )
 
@@ -90,11 +92,13 @@ def check_for_updates(repository: str, *, timeout_seconds: float = 8.0) -> Updat
     except urllib.error.HTTPError as exc:
         return UpdateCheckResult(
             current_version=current,
+            release_url=fallback_release_url,
             error=f"GitHub update check failed: HTTP {exc.code}",
         )
     except Exception as exc:
         return UpdateCheckResult(
             current_version=current,
+            release_url=fallback_release_url,
             error=f"GitHub update check failed: {type(exc).__name__}: {exc}",
         )
 
@@ -363,6 +367,13 @@ def _build_manifest_url(repository: str) -> str:
     owner, repo = repository.split("/", 1)
     base = f"https://raw.githubusercontent.com/{owner}/{repo}/refs/heads/{UPDATE_FILES_BRANCH}/{UPDATE_FILES_ROOT}"
     return f"{base}/update-manifest.json"
+
+
+def _build_release_page_url(repository: str) -> str:
+    repo = repository.strip().strip("/")
+    if not repo or "/" not in repo:
+        return ""
+    return f"https://github.com/{repo}/releases/latest"
 
 
 def _build_manifest_file_url(result: UpdateCheckResult, relative_path: str) -> str:

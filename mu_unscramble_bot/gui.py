@@ -1560,8 +1560,18 @@ class DesktopApp:
     def _handle_update_result(self, result: UpdateCheckResult, *, silent_if_current: bool = False) -> None:
         if result.error:
             self.append_log(result.error)
+            if result.release_url:
+                self.append_log(f"Manual download page: {result.release_url}")
             if not silent_if_current:
-                messagebox.showinfo(APP_NAME, result.error)
+                if result.release_url:
+                    open_page = messagebox.askyesno(
+                        APP_NAME,
+                        f"{result.error}\n\nOpen the releases page now for a manual download?",
+                    )
+                    if open_page:
+                        open_release_page(result.release_url)
+                else:
+                    messagebox.showinfo(APP_NAME, result.error)
             return
 
         if not result.available:
