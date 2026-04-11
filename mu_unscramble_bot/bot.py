@@ -10,6 +10,7 @@ from typing import Callable
 
 from mu_unscramble_bot.config import BotConfig
 from mu_unscramble_bot.models import Puzzle, SolverResult
+from mu_unscramble_bot.ocr_line_logger import OCRLineLogger
 from mu_unscramble_bot.parser import parse_guessed_word, parse_puzzle
 from mu_unscramble_bot.overlay import OverlayPayload, StatusOverlay
 from mu_unscramble_bot.privilege import get_window_pid, is_current_process_elevated, is_pid_elevated
@@ -42,6 +43,11 @@ class MuUnscrambleBot:
         self.reader = YellowTextReader(config)
         self.solver: SolverChain = build_solver_chain(config)
         self.submitter = AnswerSubmitter(config)
+        self.ocr_line_logger = OCRLineLogger(
+            config.ocr_line_log_path,
+            enabled=config.ocr_line_log_enabled,
+            dedupe_seconds=config.ocr_line_log_dedupe_seconds,
+        )
         self.overlay = StatusOverlay(config)
         self._last_solved_at: dict[str, float] = {}
         self._last_failed_at: dict[str, float] = {}
@@ -82,6 +88,11 @@ class MuUnscrambleBot:
         memory_count = self.solver.memory_size()
         if memory_count:
             self._log(f"Loaded {memory_count} saved question/answer rows from the spreadsheet cache.")
+        if self.config.ocr_line_log_enabled:
+            self._log(
+                "OCR area logging enabled. New lines from the puzzle capture box will be saved to "
+                f"{self.config.ocr_line_log_path}"
+            )
         self._log("Watching screen for yellow unscramble text. Press Ctrl+C to stop.")
         self._publish_status(
             status="Watching the center yellow text...",
@@ -108,6 +119,7 @@ class MuUnscrambleBot:
             return None, None
 
         self._recent_ocr_lines.append(capture.lines)
+        self.ocr_line_logger.log_lines(capture.lines, capture.region)
         merged_lines = self._merged_recent_lines()
         live_ocr_text = self._format_live_ocr_lines(capture.lines)
         observed_answer = parse_guessed_word(capture.lines) or parse_guessed_word(merged_lines)

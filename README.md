@@ -84,6 +84,7 @@ Test the configured API/model by itself:
 Saved question/answer memory:
 
 - Solved questions are written automatically to `data/question_memory.csv`
+- OCR lines from the puzzle capture box are written separately to `data/puzzle_area_text_log.csv`
 - That CSV is checked before any API request
 - You can open it directly in Excel
 - You can also seed fast local answers manually in `data/local_dictionary.txt`
@@ -139,6 +140,8 @@ Desktop app:
 - `OPENAI_BASE_URL` lets you point the solver at OpenRouter or another OpenAI-compatible endpoint.
 - `test_api_on_startup=true` sends a tiny prompt when the bot starts so you can see whether the configured model is reachable.
 - `question_memory_path` points to the spreadsheet-style CSV file used for saved question/answer recall.
+- `ocr_line_log_path` points to a separate CSV that records OCR lines seen in the puzzle capture area.
+- `ocr_line_log_dedupe_seconds` suppresses repeated writes while the same line is still scrolling upward.
 - `github_answer_sheet_*` settings let every bot sync that local sheet with one shared GitHub CSV.
 - `local_dictionary_enabled`, `local_dictionary_max_words`, and `local_dictionary_path` control the offline anagram solver.
 - `online_solver_timeout_seconds` caps the slower API fallback so the bot does not wait too long on a miss.

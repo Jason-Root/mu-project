@@ -67,6 +67,9 @@ class BotConfig:
     api_test_prompt: str = "What is 2+2? Reply with only 4."
     api_test_timeout_seconds: float = 20.0
     ocr_history_frames: int = 6
+    ocr_line_log_enabled: bool = True
+    ocr_line_log_path: str = "data/puzzle_area_text_log.csv"
+    ocr_line_log_dedupe_seconds: float = 10.0
     question_memory_enabled: bool = True
     question_memory_path: str = "data/question_memory.csv"
     question_memory_fuzzy_match: bool = True
@@ -140,6 +143,7 @@ def load_config(path: str | Path | None = None) -> BotConfig:
     config.openai_app_title = os.getenv("OPENAI_APP_TITLE", config.openai_app_title)
     config.github_answer_sheet_token = os.getenv("GITHUB_TOKEN", config.github_answer_sheet_token)
     config.question_memory_path = str(resolve_user_path(config.question_memory_path))
+    config.ocr_line_log_path = str(resolve_user_path(config.ocr_line_log_path))
     config.local_dictionary_path = str(resolve_user_path(config.local_dictionary_path))
     if config.memory_only_mode:
         config.test_api_on_startup = False
@@ -203,6 +207,9 @@ def save_config(config: BotConfig, path: str | Path | None = None) -> Path:
         "api_test_prompt": config.api_test_prompt,
         "api_test_timeout_seconds": config.api_test_timeout_seconds,
         "ocr_history_frames": config.ocr_history_frames,
+        "ocr_line_log_enabled": config.ocr_line_log_enabled,
+        "ocr_line_log_path": config.ocr_line_log_path,
+        "ocr_line_log_dedupe_seconds": config.ocr_line_log_dedupe_seconds,
         "question_memory_enabled": config.question_memory_enabled,
         "question_memory_path": config.question_memory_path,
         "question_memory_fuzzy_match": config.question_memory_fuzzy_match,
